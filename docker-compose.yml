@@ -1,4 +1,4 @@
-# Hermes Workspace + Agent — Docker Compose Setup
+# Hermes Workspace + Agent + Dashboard — Docker Compose Setup
 #
 # Requirements:
 #   - Docker & Docker Compose
@@ -10,7 +10,7 @@
 #   1. cp .env.example .env
 #   2. Add at least one provider key (whichever you use)
 #   3. docker compose up
-#   4. Open http://localhost:3000
+#   4. Open http://localhost:3000 (workspace) and http://localhost:9119 (dashboard)
 #
 # Images:
 #   This file pulls pre-built images by default — no local build required.
@@ -22,14 +22,17 @@
 #
 # Persistent data:
 #   The `claude-data` named volume mounts at /opt/data inside the agent
-#   container. Config, sessions, skills, memory, and credentials live there
-#   and survive container recreation. For host-path mounts see the commented
-#   `volumes:` block on the hermes-agent service.
+#   and dashboard containers. Config, sessions, skills, memory, and
+#   credentials live there and survive container recreation. For host-path
+#   mounts see the commented `volumes:` block on the hermes-agent service.
 #
 # Troubleshooting:
 #   - See README.md "Docker" troubleshooting section
 #   - Check logs: docker compose logs hermes-agent
 #   - Agent must expose port 8642
+#   - VERIFY the dashboard command before deploying. Run:
+#       docker run --rm --entrypoint hermes nousresearch/hermes-agent:latest dashboard --help
+#     and adjust the `command:` and `ports:` on hermes-dashboard if needed.
 
 services:
   # The Claude AI Agent Gateway
@@ -40,7 +43,12 @@ services:
     # immediately under `docker compose up -d`. We override here to start the
     # gateway, which is the long-running API/health server the Workspace needs.
     # See #360.
-    command: ["gateway", "run", "dashboard"]
+    #
+    # NOTE: previous value was ["gateway", "run", "dashboard"]; the trailing
+    # `dashboard` token is rejected by current builds of hermes-agent (argparse
+    # "unrecognized arguments: dashboard"). The dashboard is now run as a
+    # separate service below.
+    command: ["gateway", "run"]
     env_file:
       - .env
     environment:
@@ -79,6 +87,45 @@ services:
       start_period: 15s
     ports:
       - '8642:8642'
+
+
+  # The Hermes Dashboard
+  # Separate long-running process that serves the dashboard UI / API.
+  # Reuses the hermes-agent image but invokes a different subcommand.
+  hermes-dashboard:
+    image: nousresearch/hermes-agent:latest
+    # VERIFY this command against `hermes dashboard --help` in the current
+    # image before deploying — it may want a sub-subcommand (e.g.
+    # ["dashboard", "run"]) or flags like --host / --port.
+    command: ["dashboard"]
+    depends_on:
+      hermes-agent:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Provider keys — pass through in case the dashboard needs them
+      # directly (some subcommands instantiate their own client).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      # Point the dashboard at the gateway over the internal docker network.
+      HERMES_API_URL: http://hermes-agent:8642
+      HERMES_API_TOKEN: ${API_SERVER_KEY:-}
+      # If the dashboard exposes its own server-key gate, reuse the same
+      # value so you don't have to manage two secrets.
+      API_SERVER_KEY: ${API_SERVER_KEY:-}
+    volumes:
+      # Share state with the agent so the dashboard sees the same sessions,
+      # skills, and config. Drop this mount if the dashboard is purely an
+      # HTTP client of the gateway.
+      - claude-data:/opt/data
+    ports:
+      # Default assumed dashboard port. Confirm with `dashboard --help` and
+      # adjust both sides of the mapping if it binds elsewhere.
       - '9119:9119'
 
 
